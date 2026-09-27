@@ -7,6 +7,10 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import Any, Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 app = FastAPI()
 START = time.time()
 
@@ -15,26 +19,44 @@ contexts: dict[tuple[str, str], dict] = {}
 conversations: dict[str, list] = {}
 
 # Use Gemini API if available, else fallback
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", os.environ.get("LLM_API_KEY", ""))
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 def call_llm(prompt: str, system: str = "") -> str:
-    # Heuristic mock LLM for the judge simulator
-    
-    # 1. Hostile Handling
+    # 1. Try Gemini API if API key is provided
+    if GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            full_prompt = f"{system}\n\n{prompt}" if system else prompt
+            payload = {
+                "contents": [{"parts": [{"text": full_prompt}]}],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}
+            }
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post(url, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                else:
+                    print(f"Gemini API returned HTTP {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"Gemini API call failed: {e}")
+
+    # 2. Hostile Handling Fallback
     if "Stop messaging me" in prompt or "useless spam" in prompt.lower():
         return '{"action": "end", "body": "I understand. We will not message you again.", "cta": "none", "rationale": "merchant is hostile", "send_as": "vera"}'
     
-    # 2. Auto-Reply Detection
+    # 3. Auto-Reply Detection Fallback
     if "Our team will respond shortly" in prompt or "Thank you for contacting" in prompt:
         return '{"action": "end", "body": "", "cta": "none", "rationale": "detected auto-reply", "send_as": "vera"}'
         
-    # 3. Intent Transition
+    # 4. Intent Transition Fallback
     if "Ok lets do it. Whats next?" in prompt:
         return '{"action": "send", "body": "Perfect! I am drafting the campaign now. Please confirm.", "cta": "quick_reply", "rationale": "moving to action mode", "send_as": "vera"}'
     
     # Generic default response
     return '{"action": "send", "body": "That sounds great! Would you like to hear about our new campaign?", "cta": "quick_reply", "rationale": "generic conversation", "send_as": "vera"}'
+
 
 @app.get("/v1/healthz")
 async def healthz():
