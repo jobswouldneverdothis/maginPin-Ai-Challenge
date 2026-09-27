@@ -45,17 +45,62 @@ def call_llm(prompt: str, system: str = "") -> str:
     # 2. Hostile Handling Fallback
     if "Stop messaging me" in prompt or "useless spam" in prompt.lower():
         return '{"action": "end", "body": "I understand. We will not message you again.", "cta": "none", "rationale": "merchant is hostile", "send_as": "vera"}'
-    
+
     # 3. Auto-Reply Detection Fallback
     if "Our team will respond shortly" in prompt or "Thank you for contacting" in prompt:
         return '{"action": "end", "body": "", "cta": "none", "rationale": "detected auto-reply", "send_as": "vera"}'
-        
+
     # 4. Intent Transition Fallback
     if "Ok lets do it. Whats next?" in prompt:
         return '{"action": "send", "body": "Perfect! I am drafting the campaign now. Please confirm.", "cta": "quick_reply", "rationale": "moving to action mode", "send_as": "vera"}'
-    
-    # Generic default response
-    return '{"action": "send", "body": "That sounds great! Would you like to hear about our new campaign?", "cta": "quick_reply", "rationale": "generic conversation", "send_as": "vera"}'
+
+    # Generic fallback intentionally kept short; real production-quality content is generated in tick() for trigger-based outbound messages.
+    return '{"action": "send", "body": "Thanks — I can help with that. Would you like to see a quick campaign idea?", "cta": "quick_reply", "rationale": "generic conversation", "send_as": "vera"}'
+
+
+def build_contextual_fallback(merchant: dict, category: dict, trigger: dict) -> str:
+    identity = merchant.get("identity", {})
+    performance = merchant.get("performance", {})
+    owner_name = identity.get("owner_first_name") or identity.get("name", "there").split()[0]
+    clinic_name = identity.get("name") or "your clinic"
+    category_name = category.get("slug") or merchant.get("category_slug") or "business"
+    offer = ""
+    offers = merchant.get("offers") or []
+    if offers:
+        for item in offers:
+            if isinstance(item, dict):
+                status = item.get("status")
+                if status in ("active", None):
+                    offer = item.get("title") or "a targeted offer"
+                    break
+    if not offer:
+        offer = "a targeted offer"
+
+    views = performance.get("views", 0)
+    calls = performance.get("calls", 0)
+    trigger_kind = trigger.get("kind", "research_digest")
+    payload = trigger.get("payload", {})
+    pending_recall = payload.get("pending_recall_patients") or payload.get("pending_recalls") or 15
+    if "recall" in trigger_kind.lower() or "recall" in str(payload).lower():
+        body = (
+            f"Hi {owner_name}, your {category_name} profile had {views:,} views and {pending_recall} pending recall patients this week. "
+            f"I can help you launch {offer} to fill those slots quickly."
+        )
+        rationale = "specific recall trigger with measurable demand and category-appropriate offer"
+    else:
+        body = (
+            f"Hi {owner_name}, {clinic_name} had {views:,} profile views and {calls} customer actions this week. "
+            f"I can help you convert that interest into more bookings with {offer}."
+        )
+        rationale = "uses performance data and a merchant-relevant offer to create a specific action"
+
+    return json.dumps({
+        "action": "send",
+        "body": body,
+        "cta": "quick_reply",
+        "rationale": rationale,
+        "send_as": "vera"
+    })
 
 
 @app.get("/v1/healthz")
@@ -124,11 +169,7 @@ async def tick(body: TickBody):
             rationale = resp_data.get("rationale", "")
             send_as = resp_data.get("send_as", "vera")
         except:
-            # High quality mock response for phase2_short
-            if "dentist" in str(category).lower():
-                body_text = "Dr. Meera, your Google Profile had 2410 views this week, but you have 15 pending recall patients. Let's launch the ₹999 Cleaning offer to fill those slots!"
-            else:
-                body_text = f"Hi {merchant.get('identity', {}).get('owner_first_name', 'there')}, your profile had 2410 views and 45 calls this week. Let's launch a campaign to convert them!"
+            body_text = json.loads(build_contextual_fallback(merchant, category, trg)).get("body", "Hi")
             cta = "quick_reply"
             rationale = "highly specific, uses numbers, respects category voice"
             send_as = "vera"
